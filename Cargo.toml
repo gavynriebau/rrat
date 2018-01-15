@@ -1,0 +1,6 @@
+[package]
+name = "rrat"
+version = "0.1.0"
+authors = ["Gavyn Riebau <gavyn.riebau@gmail.com>"]
+
+[dependencies]
