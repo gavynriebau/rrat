@@ -54,7 +54,7 @@ fn main() {
             let count = stream.read(&mut buffer).unwrap();
 
             if count > 0 {
-                debug!("'{}' NETWORK to NET_TX", count);
+                debug!("{:>4} NETWORK to NET_TX", count);
                 net_tx.send(Vec::from(&buffer[0..count])).unwrap();
             }
 
@@ -65,7 +65,7 @@ fn main() {
     let thread_net_write = thread::spawn(move || {
         loop {
             let data = shell_rx.recv().unwrap();
-            debug!("'{}' SHELL_RX to NETWORK", data.len());
+            debug!("{:>4} SHELL_RX to NETWORK", data.len());
 
             cloned_stream.write(data.as_slice()).unwrap();
             cloned_stream.take_error().unwrap();
@@ -79,7 +79,7 @@ fn main() {
             let count = bash_out.read(&mut buffer).unwrap();
             
             if count > 0 {
-                debug!("'{}' SHELL to SHELL_TX", count);
+                debug!("{:>4} SHELL to SHELL_TX", count);
                 shell_tx.send(Vec::from(&buffer[0..count])).unwrap();
             }
         }
@@ -88,7 +88,7 @@ fn main() {
     let thread_shell_write = thread::spawn(move || {
         loop {
             let data = net_rx.recv().unwrap();
-            debug!("'{}' NET_RX to SHELL", data.len());
+            debug!("{:>4} NET_RX to SHELL", data.len());
             bash_in.write(data.as_slice()).unwrap();
         }
     });
