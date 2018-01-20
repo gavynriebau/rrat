@@ -2,10 +2,8 @@ use std::net::*;
 use std::process::*;
 use std::io::*;
 use std::thread;
-use std::thread::*;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
-use std::time::Duration;
 
 fn main() {
     println!("Starting...");
@@ -44,7 +42,6 @@ fn main() {
             }
 
             stream.take_error().unwrap();
-            //sleep(Duration::from_millis(1000));
         }
     });
 
@@ -56,9 +53,7 @@ fn main() {
             println!("Received from shell '{}' bytes", data.len());
 
             cloned_stream.write(data.as_slice()).unwrap();
-
             cloned_stream.take_error().unwrap();
-            //sleep(Duration::from_millis(1000));
         }
     });
 
@@ -75,8 +70,6 @@ fn main() {
                 println!("read '{}' bytes from shell", count);
                 shell_tx.send(Vec::from(&buffer[0..count])).unwrap();
             }
-
-            //sleep(Duration::from_millis(1000));
         }
     });
 
@@ -87,8 +80,6 @@ fn main() {
             let data = net_rx.recv().unwrap();
             println!("read '{}' bytes from socket", data.len());
             bash_in.write(data.as_slice()).unwrap();
-
-            //sleep(Duration::from_millis(1000));
         }
     });
 
