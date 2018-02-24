@@ -61,7 +61,7 @@ fn handle_network_connection(stream: TcpStream) {
             match bash_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
-                        match net_in.write(&mut buffer) {
+                        match net_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
                                 trace!("shell --> {:>4} --> socket", write_count);
                             },
@@ -94,9 +94,9 @@ fn handle_network_connection(stream: TcpStream) {
         loop {
 
             match net_out.read(&mut buffer) {
-                Ok(count) => {
-                    if count > 0 {
-                        match bash_in.write(&mut buffer) {
+                Ok(read_count) => {
+                    if read_count > 0 {
+                        match bash_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => trace!("shell <-- {:>4} <-- socket", write_count),
                             Err(e) => {
                                 error!("Error writing to bash: {}", e);
