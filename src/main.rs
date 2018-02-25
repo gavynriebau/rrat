@@ -14,9 +14,7 @@ use std::net::*;
 use std::process::*;
 use std::io::*;
 use std::thread;
-use std::sync::{Arc};
-// use std::sync::mpsc;
-// use std::sync::mpsc::*;
+use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -43,13 +41,13 @@ fn handle_network_connection(stream: TcpStream) {
         .expect("Failed to run command");
 
     debug!("Opening shell IO and creating sender / receiver channels");
-    let mut bash_out = shell_child.stdout.expect("Failed to open command stdout");
-    let mut bash_in = shell_child.stdin.expect("Failed to open command stdin");
-    let mut net_in = stream;
-    let mut net_out = cloned_stream;
+    let mut shell_out = shell_child.stdout.expect("Failed to open command stdout");
+    let mut shell_in = shell_child.stdin.expect("Failed to open command stdin");
+    let mut network_in = stream;
+    let mut network_out = cloned_stream;
     let finished = Arc::new(AtomicBool::new(false));
-    let bash_reading_finished = Arc::clone(&finished);
-    let sock_reading_finished = Arc::clone(&finished);
+    let shell_reading_finished = Arc::clone(&finished);
+    let network_reading_finished = Arc::clone(&finished);
 
     debug!("Beginning IO read/write loops");
 
@@ -58,12 +56,13 @@ fn handle_network_connection(stream: TcpStream) {
         let mut buffer: [u8; 512] = [0; 512];
 
         loop {
-            match bash_out.read(&mut buffer) {
+            match shell_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
-                        match net_in.write(&mut buffer[0..read_count]) {
+                        match network_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
                                 trace!("shell --> {:>4} --> socket", write_count);
+                                network_in.flush().unwrap();
                             },
                             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                                 // Wait until network socket is ready.
@@ -71,7 +70,7 @@ fn handle_network_connection(stream: TcpStream) {
                             },
                             Err(e) => {
                                 error!("Error reading from stream: {}", e);
-                                bash_reading_finished.store(true, Ordering::Relaxed);
+                                shell_reading_finished.store(true, Ordering::Relaxed);
                                 break;
                             }
                         }
@@ -79,7 +78,7 @@ fn handle_network_connection(stream: TcpStream) {
                 },
                 Err(e) => {
                     error!("Failed to read from bash because: {}", e);
-                    bash_reading_finished.store(true, Ordering::Relaxed);
+                    shell_reading_finished.store(true, Ordering::Relaxed);
                 }
             }
 
@@ -93,14 +92,17 @@ fn handle_network_connection(stream: TcpStream) {
 
         loop {
 
-            match net_out.read(&mut buffer) {
+            match network_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
-                        match bash_in.write(&mut buffer[0..read_count]) {
-                            Ok(write_count) => trace!("shell <-- {:>4} <-- socket", write_count),
+                        match shell_in.write(&mut buffer[0..read_count]) {
+                            Ok(write_count) => {
+                                trace!("shell <-- {:>4} <-- socket", write_count);
+                                shell_in.flush().unwrap();
+                            },
                             Err(e) => {
                                 error!("Error writing to bash: {}", e);
-                                sock_reading_finished.store(true, Ordering::Relaxed);
+                                network_reading_finished.store(true, Ordering::Relaxed);
                             }
                         }
                     }
@@ -111,7 +113,7 @@ fn handle_network_connection(stream: TcpStream) {
                 },
                 Err(e) => {
                     error!("Error reading from stream: {}", e);
-                    sock_reading_finished.store(true, Ordering::Relaxed);
+                    network_reading_finished.store(true, Ordering::Relaxed);
                     break;
                 }
             }
